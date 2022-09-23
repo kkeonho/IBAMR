@@ -146,11 +146,22 @@ main(int /*argc*/, char** /*argv*/)
     }
     const int totnode = nnum + 1;
 
+    std::cout << "totnode = " << totnode << std::endl;
+
+
+    /* enumeration of particles represented by o
+    4 o 8 o
+    3 o 7 o
+    2 o 6 o
+    1 o 5 o 
+    0 o 
+    */
     double coord[totnode][2];
     for (int i = 0; i < totnode; ++i)
     {
         coord[i][0] = coord1[i][0];
         coord[i][1] = coord1[i][1];
+        std::cout << "i= " << i << ", coords = " << coord1[i][0] << ", " << coord1[i][1] << std::endl;
     }
 
 
@@ -164,9 +175,9 @@ main(int /*argc*/, char** /*argv*/)
     // Determination of material points inside the horizon of each material point
     int numfam[totnode];
     std::map<Edge, EdgeProp, EdgeComp> mesh;
-    for (int i = 0; i < totnode; ++i)
+    for (int i = 0; i < totnode; ++i) // index of master
     {   numfam[i] = 0;
-        for (int j = 0; j < totnode; ++j)
+        for (int j = 0; j < totnode; ++j) // index of slave
         {
             const double idist = sqrt(pow((coord[j][0] - coord[i][0]), 2) + pow((coord[j][1] - coord[i][1]), 2));
             if (i != j)

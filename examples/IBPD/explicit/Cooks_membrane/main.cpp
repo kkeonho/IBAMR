@@ -39,6 +39,9 @@
 // Set up application namespace declarations
 #include <ibamr/app_namespaces.h>
 
+// This example is the Cook's membrane example without fluid.
+// We use a (bond-associated) stabilized version of the deformation gradient.
+
 // Function prototypes
 void output_data(Pointer<PatchHierarchy<NDIM> > patch_hierarchy,
                  Pointer<INSHierarchyIntegrator> navier_stokes_integrator,
@@ -68,6 +71,24 @@ static const double y_left_begin = 0.0;
 static const double y_left_end = 4.4;
 static const double y_right_begin = 4.4;
 static const double y_right_end = 6.0;
+static const double dens = 1.0;
+
+static const int nx = 25; 
+static const int ny = 23;
+#if (NDIM == 3)
+    static const int nz = 1;
+    static const int left_begin = 0;
+    static const int left_end = ny*nz - 1;
+    static const int right_begin = ny * nz * nx - ny*nz; // make sure this is what is supposed to be
+    static const int right_end = ny * nz * nx - 1;
+#endif
+#if (NDIM == 2)
+    static const int left_begin = 0;
+    static const int left_end = 22; //ny - 1;
+    static const int right_begin = 372;//nx*ny - ny; // make sure this is what is supposed to be
+    static const int right_end = 380;//nx*ny - 1;
+#endif
+
 
 static const double appres = 6.25;                                          // External loading
 static double indi = 1.0;
@@ -103,6 +124,7 @@ my_inf_fcn(double R0, double /*delta*/)
 
 } // my_inf_fcn
 
+//Calculate how much of the volume of a particle contributes to the horizon
 double
 my_vol_frac_fcn(double R0, double /*horizon*/, double /*delta*/)
 {
@@ -167,7 +189,12 @@ my_PK1_fcn(Eigen::Matrix<double, NDIM, NDIM, Eigen::RowMajor>& PK1,
     // PK1 = G * (F0 - tr_cc*FF_inv_trans/2.)/J + K * (Jsquare - 1./Jsquare)*FF_inv_trans/4.;
     // PK1 = G * Jp * (F0 - tr_cc * FF_inv_trans / 3.0) + K * (Jsquare - 1./Jsquare)*FF_inv_trans/4.;
     // PK1 = G * Jp * (F0 - tr_cc * FF_inv_trans / 3.0) + K_n * J * log(J) * FF_inv_trans;
+
+    //modified invariants - eqn 2.34 Ben's thesis
     PK1 = G * Jp * (F0 - tr_cc * FF_inv_trans / 3.0) + K_bulk * log(J) * FF_inv_trans;
+
+    //non-stabilized neo-hookean PK1 - eqn 2.32 Ben's thesis
+    //PK1 = G * F0 + K_bulk * log(J) * FF_inv_trans;
 
     return;
 } // my_PK1_fcn
@@ -186,8 +213,8 @@ my_force_damage_fcn(const double /*horizon*/,
                     const Eigen::Map<const Eigen::Matrix<double, NDIM, NDIM, Eigen::RowMajor> >& FF_slave,
                     const Eigen::Map<const Eigen::Matrix<double, NDIM, NDIM, Eigen::RowMajor> >& B_mastr,
                     const Eigen::Map<const Eigen::Matrix<double, NDIM, NDIM, Eigen::RowMajor> >& B_slave,
-                    Eigen::Map<IBTK::Vector>& F_mastr,
-                    Eigen::Map<IBTK::Vector>& F_slave,
+                    Eigen::Map<IBTK::Vector>& F_mastr, // part of the equation of motion 
+                    Eigen::Map<IBTK::Vector>& F_slave, // maybe we do not use it
                     const int lag_mastr_node_idx,
                     const int lag_slave_node_idx)
 {
@@ -207,6 +234,8 @@ my_force_damage_fcn(const double /*horizon*/,
     //     fail = 0.0;
     // }
 
+    double q = 2* acos(R/2*horizon);
+    double bond_associated_weight = (q-sin(q))/ pi;
     // PK1 stress tensor
     using vec_type = IBTK::Vector;
     using mat_type = Eigen::Matrix<double, NDIM, NDIM, Eigen::RowMajor>;
@@ -216,8 +245,10 @@ my_force_damage_fcn(const double /*horizon*/,
 
     // Compute PD force
     vec_type trac = W * (PK1_mastr * B_mastr + PK1_slave * B_slave) * (X0_slave - X0_mastr);
+    vec_type trac_stab = trac /bond_associated_weight;
     #if (NDIM == 3)
-        trac(2) = 0.0;
+        trac(2)=0;
+        trac_stab(2) = 0.0;
     #endif
 
     // static const double dy = (y_left_end - y_left_begin) / double(ny-1);
@@ -231,8 +262,8 @@ my_force_damage_fcn(const double /*horizon*/,
     // const double modi_vol_mastr = vol_mastr / DX * (length_mastr / double(ny -1));
     // const double modi_vol_slave = vol_slave / DX * (length_slave / double(ny -1));
 
-    F_mastr += fail * vol_frac * vol_slave * trac;
-    F_slave += -fail * vol_frac * vol_mastr * trac;
+    F_mastr += fail * vol_frac * vol_slave * trac_stab;
+    F_slave += -fail * vol_frac * vol_mastr * trac_stab;
 
     // // zero energy mode
     // const double C_hg = 0.0;
@@ -261,51 +292,58 @@ my_force_damage_fcn(const double /*horizon*/,
     
 } // my_force_damage_fcn
 
-void
-my_surface_force_func(const Eigen::Map<const IBTK::Vector>& X,
-                          const Eigen::Map<const IBTK::Vector>& X_target,
-                          const Eigen::Map<const IBTK::Vector>& U,
-                          int lag_idx,
-                          Eigen::Map<IBTK::Vector>& F)
-{
-    //X_target is the material variable, X is the spatial variable
-    static double kappa = 4.0e5;
-    // static double ddx = 1.6 / 4.4 * DX;
-    // cook's membrane
-    if (X_target(0) <= x_begin+2.0)
-    {
-        F += kappa * (X_target - X);
-    }
-    else if (X_target(0) == x_end+2.0)
-    {   
-        if (current_time < load_time)
-        {
-          F(1) += appres / DX * current_time / load_time;
-        }
-        else
-        {
-          F(1) += appres / DX;
-        }
-    }
+// void
+// my_surface_force_func(const Eigen::Map<const IBTK::Vector>& X,
+//                           const Eigen::Map<const IBTK::Vector>& X_target,
+//                           const Eigen::Map<const IBTK::Vector>& U,
+//                           int lag_idx,
+//                           Eigen::Map<IBTK::Vector>& F)
+// {
+//  //   std::cout<< "inside my_surface_force_func" << std::endl;
+//     //X_target is the material variable, X is the spatial variable
+//     static double kappa = 4.0e5;
+//     // static double ddx = 1.6 / 4.4 * DX;
+//     // cook's membrane
+//     if (X_target(0) <= x_begin+2.0)
+//     {
+//         F += kappa * (X_target - X);
+//     }
+//     else if (X_target(0) == x_end+2.0)
+//     {   
+//         if (indi < Max_force_indi)
+//         {
+//           F(1) += appres / DX * indi / Max_force_indi;
+//         }
+//         else
+//         {
+//           F(1) += appres / DX;
+//         }
+//     }
 
-    return;
-} // my_surface_force_func
+//     if (lag_idx == totnode - 1)
+//     {
+//         indi += 1.0;
+//     }
+//     return;
+// } // my_surface_force_func
 
-void
-my_target_point_force_fcn(const Eigen::Map<const IBTK::Vector>& X,
-                          const Eigen::Map<const IBTK::Vector>& X_target,
-                          const Eigen::Map<const IBTK::Vector>& U,
-                          double K,
-                          double ETA,
-                          int lag_idx,
-                          Eigen::Map<IBTK::Vector>& F)
-{
-    F += - Damping * U;
+//when we do not have fluid, we have to change the time stepping by hand
+// because when we have fluid, we just update the lagrangian force like below
+// void
+// my_target_point_force_fcn(const Eigen::Map<const IBTK::Vector>& X,
+//                           const Eigen::Map<const IBTK::Vector>& X_target,
+//                           const Eigen::Map<const IBTK::Vector>& U,
+//                           double K,
+//                           double ETA,
+//                           int lag_idx,
+//                           Eigen::Map<IBTK::Vector>& F)
+// {
+//     // F += - Damping * U;
 
-    my_surface_force_func(X, X_target, U, lag_idx, F);
+//     // my_surface_force_func(X, X_target, U, lag_idx, F);
 
-    return;
-} // my_target_point_force_fcn
+//     return;
+// } // my_target_point_force_fcn
 
 class MyIBPDMethod : public IBPDMethod
 {
@@ -419,6 +457,141 @@ public:
 
         return;
     } // postprocessIntegrateData
+
+    // If were to calculate X at n+1/2 (X_half), so we could use its value at the midpointStep,
+    // we would define void forwardEulerStep(const double current_time, const double new_time) override
+
+
+    // midpointStep ex0 - which was formulated for a 2d block - gotta be careful with indexing (lag_idx)
+     void midpointStep(const double current_time, const double new_time) override
+    {
+        // damping parameter - this needs to be calibrated
+        // this essentially helps us to get to the steady state faster
+        // it also depends on how big dens is
+        static const double cn = 100;
+
+        const double dt = new_time - current_time;
+        const int coarsest_ln = 0;
+        const int finest_ln = d_hierarchy->getFinestLevelNumber();
+
+        for (int ln = coarsest_ln; ln <= finest_ln; ++ln)
+        {
+            if (!d_l_data_manager->levelContainsLagrangianData(ln)) continue;
+
+            Pointer<LData> X_0_data = d_l_data_manager->getLData("X0", ln);
+            Pointer<LData> X_current_data = d_X_current_data[ln];
+            Pointer<LData> X_new_data = d_X_new_data[ln];
+            Pointer<LData> U_current_data = d_U_current_data[ln];
+            Pointer<LData> U_new_data = d_U_new_data[ln];
+
+            // F_half is the internal forces is calculated in IBPDForceGen -  Same as F_data
+            // Hypothesis: this is actually equal to F_current (?)
+            // Argument: if this was actually at n+1/2 then it should depend on X_half
+            // Check IBMethod VecSwap
+            Pointer<LData> F_half_data = d_F_half_data[ln];
+
+            boost::multi_array_ref<double, 2>& X_0_data_array = *X_0_data->getLocalFormVecArray();
+            boost::multi_array_ref<double, 2>& X_current_data_array = *X_current_data->getLocalFormVecArray();
+            boost::multi_array_ref<double, 2>& X_new_data_array = *X_new_data->getLocalFormVecArray();
+            boost::multi_array_ref<double, 2>& U_current_data_array = *U_current_data->getLocalFormVecArray();
+            boost::multi_array_ref<double, 2>& U_new_data_array = *U_new_data->getLocalFormVecArray();
+            boost::multi_array_ref<double, 2>& F_half_data_array = *F_half_data->getLocalFormVecArray();
+
+            const Pointer<LMesh> mesh = d_l_data_manager->getLMesh(ln);
+            const std::vector<LNode*>& local_nodes = mesh->getLocalNodes();
+            for (const auto& node : local_nodes)
+            {
+                const int lag_idx = node->getLagrangianIndex();
+                const int local_idx = node->getLocalPETScIndex(); // PETSc takes care of this, do not have to worry about it
+
+                const double* U_current = &U_current_data_array[local_idx][0];
+                double* U_new = &U_new_data_array[local_idx][0];
+
+                const double* X_0 = &X_0_data_array[local_idx][0];
+                const double* X_current = &X_current_data_array[local_idx][0];
+                double* X_new = &X_new_data_array[local_idx][0];
+                double* F_half = &F_half_data_array[local_idx][0];
+
+                // constraining the left side of the material body
+                // bottom and top points of the lagrangian boundary on the left side
+                if (lag_idx >= left_begin && lag_idx <= left_end)
+                {
+                    for (int d = 0; d < NDIM; ++d)
+                    {
+                        U_new[d] = 0.0;
+                        X_new[d] = X_current[d];
+                    }
+                }
+                else if (lag_idx >= right_begin && lag_idx <= right_end)
+                {
+                    double bforce[NDIM] = { 0.0 };
+                    {
+                        bforce[1] = appres / DX; //DY=DX
+                    }
+                    for (int d = 0; d < NDIM; ++d)
+                    {
+                      if (d == 2) // no z-diretion of movement
+                      {
+                        U_new[d] = 0.0;
+                        X_new[d] = X_current[d];
+                      }
+                      else if (d == 1) // y direction of movement
+                      {
+
+                        // Forward Euler
+                        // Apply external force bforce to the y direction
+                        U_new[d] = (1.0 - cn * dt / dens) * U_current[d] + (dt / dens) * (F_half[d] + bforce[d]);
+                        //U_new[d] = (1.0 - cn * dt / dens) * U_current[d] + 1e-5 * (dt / dens) * (F_half[d] + bforce[d]);
+                        
+                        // Trapezoidal for X_new
+                        //X_new[d] = X_current[d] + 0.5 * dt * (U_new[d] + U_current[d]);
+                        X_new[d] = X_current[d] + 0.5 * dt * (U_new[d] + U_current[d]);
+                      }
+                      else // x direction
+                      {
+                        U_new[d] = (1.0 - cn * dt / dens) * U_current[d] + (dt / dens) * (F_half[d]);
+                        X_new[d] = X_current[d] + 0.5 * dt * (U_new[d] + U_current[d]);
+                      }
+                    }
+                }
+                else
+                {
+                    for (int d = 0; d < NDIM; ++d)
+                    {
+                        U_new[d] = (1.0 - cn * dt / dens) * U_current[d] + (dt / dens) * F_half[d];
+                        X_new[d] = X_current[d] + 0.5 * dt * (U_new[d] + U_current[d]);
+                    }
+                }
+            }
+
+            X_0_data->restoreArrays();
+            X_current_data->restoreArrays();
+            X_new_data->restoreArrays();
+            F_half_data->restoreArrays();
+            U_current_data->restoreArrays();
+            U_new_data->restoreArrays();
+        }
+
+        return;
+
+    } // midpointStep
+
+    // do not interact with fluid
+    void spreadForce(const int /*f_data_idx*/,
+                     RobinPhysBdryPatchStrategy* /*f_phys_bdry_op*/,
+                     const std::vector<Pointer<RefineSchedule<NDIM> > >& /*f_prolongation_scheds*/,
+                     const double /*data_time*/) override
+    {
+        return;
+    } // spreadForce
+
+    void interpolateVelocity(const int /*u_data_idx*/,
+                             const std::vector<Pointer<CoarsenSchedule<NDIM> > >& /*u_synch_scheds*/,
+                             const std::vector<Pointer<RefineSchedule<NDIM> > >& /*u_ghost_fill_scheds*/,
+                             const double /*data_time*/) override
+    {
+        return;
+    } // interpolateVelocity
 };
 
 /*******************************************************************************
@@ -440,6 +613,11 @@ main(int argc, char* argv[])
 
     { // cleanup dynamically allocated objects prior to shutdown
 
+    std::cout<< "nx =  " << nx << ", ny= " << ny << ", nx*ny = " << nx*ny << std::endl;
+    std::cout<< "left_begin = " << left_begin << std::endl;
+    std::cout<< "left_end = ny - 1 = " << left_end << std::endl;
+    std::cout<< "right_begin =  nx*ny - ny = " << right_begin << std::endl;
+    std::cout<< "right_end = nx*ny - 1 =" << right_end << std::endl;
         // Parse command line options, set some standard options from the input
         // file, initialize the restart database (if this is a restarted run),
         // and enable file logging.
@@ -531,7 +709,7 @@ main(int argc, char* argv[])
         Pointer<IBPDForceGen> ib_force_fcn = new IBPDForceGen(app_initializer->getComponentDatabase("IBPDForceGen"));
         ib_force_fcn->registerBondForceSpecificationFunction(
             0, &my_PK1_fcn, &my_force_damage_fcn, &my_inf_fcn, &my_vol_frac_fcn);
-        ib_force_fcn->registerTargetPointForceFunction(&my_target_point_force_fcn);
+        //ib_force_fcn->registerTargetPointForceFunction(&my_target_point_force_fcn);
         ib_method_ops->registerIBPDForceGen(ib_force_fcn);
 
         // Create Eulerian initial condition specification objects.  These
